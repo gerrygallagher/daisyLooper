@@ -1,5 +1,7 @@
 #include "daisy_seed.h"
 #include "daisysp.h"
+#include "dev/oled_ssd130x.h"
+#include "hid/disp/oled_display.h"
 
 using namespace daisy;
 using namespace daisysp;
@@ -34,6 +36,8 @@ enum class LooperState {
 //  Globals
 // ─────────────────────────────────────────
 DaisySeed hw;
+using MyOled = daisy::OledDisplay<daisy::SSD130xI2c128x32Driver>;  
+MyOled oled;
 
 float DSY_SDRAM_BSS loop_buffer[LOOP_BUFFER_SAMPLES];
 
@@ -300,6 +304,14 @@ void AudioCallback(AudioHandle::InputBuffer  in,
 // ─────────────────────────────────────────
 int main() {
     hw.Init();
+
+    MyOled::Config disp_cfg;
+    oled.Init(disp_cfg);
+    oled.Fill(false);
+    oled.SetCursor(0, 0);
+    oled.WriteString("BOOTED", Font_7x10, true);
+    oled.Update();
+
     hw.SetAudioBlockSize(4);
     hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 
