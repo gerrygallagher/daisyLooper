@@ -121,6 +121,18 @@ PressDetector sw2_press;
 //  Buffer helpers
 // ─────────────────────────────────────────
 void ClearLoop() {
+    const int flash_count = 3;
+    const int flash_ms = 100;
+
+    for (size_t i = 0; i < flash_count; i++)
+    {
+        led_rec.Write(true);
+        led_play.Write(true);
+        daisy::System::Delay(flash_ms);
+        led_rec.Write(false);
+        led_play.Write(false);
+        daisy::System::Delay(flash_ms);
+    }
     loop_length = 0;
     play_head   = 0;
     state       = LooperState::IDLE;
