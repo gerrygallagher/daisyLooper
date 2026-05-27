@@ -11,7 +11,7 @@ static const size_t LOOP_BUFFER_SECONDS = 60;
 static const float  SAMPLE_RATE         = 48000.f;
 static const size_t LOOP_BUFFER_SAMPLES = static_cast<size_t>(LOOP_BUFFER_SECONDS * SAMPLE_RATE);
 
-static const uint32_t LONG_PRESS_MS = 2000;  // hold SW2 to clear
+static const uint32_t LONG_PRESS_MS = 1000;  // hold SW2 to clear
 
 // Pin assignments
 static const Pin PIN_SW1 = seed::D0;   // Record / Overdub footswitch
@@ -75,33 +75,47 @@ Blinker blink_rec, blink_play;
 // ─────────────────────────────────────────
 //  Long-press detector for SW2
 // ─────────────────────────────────────────
-struct LongPressDetector {
+// ─────────────────────────────────────────
+//  SW2 press detector — distinguishes short vs long press
+//
+//  Returns:
+//    1 = short press (fires on release, only if held < LONG_PRESS_MS)
+//    2 = long press  (fires immediately when threshold crossed)
+//    0 = nothing
+// ─────────────────────────────────────────
+struct PressDetector {
     uint32_t press_start  = 0;
     bool     held         = false;
-    bool     fired        = false;
+    bool     long_fired   = false;
 
-    // Returns true once when the long press threshold is crossed
-    bool Update(Switch& sw) {
+    int Update(Switch& sw) {
         sw.Debounce();
         bool pressed = sw.Pressed();
 
+        // Just went down — start timing
         if (pressed && !held) {
             press_start = System::GetNow();
             held        = true;
-            fired       = false;
+            long_fired  = false;
         }
-        if (!pressed) {
+
+        // Held long enough — fire long press once
+        if (held && !long_fired && (System::GetNow() - press_start >= LONG_PRESS_MS)) {
+            long_fired = true;
+            return 2;
+        }
+
+        // Released — fire short press only if it wasn't a long press
+        if (!pressed && held) {
             held = false;
+            if (!long_fired) return 1;
         }
-        if (held && !fired && (System::GetNow() - press_start >= LONG_PRESS_MS)) {
-            fired = true;
-            return true;
-        }
-        return false;
+
+        return 0;
     }
 };
 
-LongPressDetector sw2_longpress;
+PressDetector sw2_press;
 
 // ─────────────────────────────────────────
 //  Buffer helpers
@@ -297,11 +311,11 @@ int main() {
         sw1.Debounce();
         if (sw1.RisingEdge()) HandleSW1();
 
-        // SW2 — check for short press or long press
-        bool sw2_long = sw2_longpress.Update(sw2);
-        if (sw2_long) {
+        // SW2 — detect short press (on release) or long press (on hold)
+        int sw2_action = sw2_press.Update(sw2);
+        if (sw2_action == 2) {
             ClearLoop();
-        } else if (sw2.RisingEdge()) {
+        } else if (sw2_action == 1) {
             HandleSW2Short();
         }
 
