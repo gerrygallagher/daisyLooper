@@ -241,10 +241,73 @@ void UpdateLeds() {
 
         case LooperState::STOPPED:
             blink_rec.SetOff();
-            blink_play.SetBlink(800);  // slow green blink = stopped/paused
+            blink_play.SetBlink(400);  // slow green blink = stopped/paused
             break;
     }
 }
+// ─────────────────────────────────────────
+//  Update OLED — state + loop time + progress bar
+// ─────────────────────────────────────────
+void UpdateDisplay() {
+    static uint32_t last_update_ms = 0;
+    uint32_t now = System::GetNow();
+    
+    // Throttle to 20 fps to avoid hogging the I2C bus
+    if (now - last_update_ms < 50) return;
+    last_update_ms = now;
+    
+    oled.Fill(false);
+    
+    // ── Top line: state name ──
+    oled.SetCursor(0, 0);
+    const char* state_text;
+    switch (state) {
+        case LooperState::IDLE:        state_text = "IDLE";    break;
+        case LooperState::RECORDING:   state_text = "REC";     break;
+        case LooperState::PLAYING:     state_text = "PLAY";    break;
+        case LooperState::OVERDUBBING: state_text = "OVERDUB"; break;
+        case LooperState::STOPPED:     state_text = "STOP";    break;
+    }
+    oled.WriteString(state_text, Font_11x18, true);
+    
+    // ── Top-right: time display M:SS / M:SS ──
+    if (loop_length > 0) {
+        uint32_t cur_sec   = play_head   / static_cast<uint32_t>(SAMPLE_RATE);
+        uint32_t total_sec = loop_length / static_cast<uint32_t>(SAMPLE_RATE);
+        
+        char time_buf[16];
+        snprintf(time_buf, sizeof(time_buf), "%lu:%02lu/%lu:%02lu",
+                 cur_sec / 60, cur_sec % 60,
+                 total_sec / 60, total_sec % 60);
+        
+        oled.SetCursor(74, 4);  // top right area
+        oled.WriteString(time_buf, Font_6x8, true);
+    }
+    
+    // ── Bottom: progress bar ──
+    if (loop_length > 0) {
+        // Bar runs from x=0 to x=127, y=24 to y=30 (6 pixels tall)
+        int bar_width = (play_head * 128) / loop_length;
+        
+        // Outline
+        for (int x = 0; x < 128; x++) {
+            oled.DrawPixel(x, 22, true);
+            oled.DrawPixel(x, 31, true);
+        }
+        oled.DrawPixel(0, 22, true);
+        oled.DrawPixel(127, 31, true);
+        
+        // Filled portion
+        for (int x = 0; x < bar_width; x++) {
+            for (int y = 23; y < 31; y++) {
+                oled.DrawPixel(x, y, true);
+            }
+        }
+    }
+    
+    oled.Update();
+}
+
 
 // ─────────────────────────────────────────
 //  Audio callback
@@ -307,10 +370,6 @@ int main() {
 
     MyOled::Config disp_cfg;
     oled.Init(disp_cfg);
-    oled.Fill(false);
-    oled.SetCursor(0, 0);
-    oled.WriteString("BOOTED", Font_7x10, true);
-    oled.Update();
 
     hw.SetAudioBlockSize(4);
     hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
@@ -346,6 +405,7 @@ int main() {
         UpdateLeds();
         blink_rec.Update(led_rec);
         blink_play.Update(led_play);
+        UpdateDisplay();
 
         daisy::System::Delay(1);
     }
