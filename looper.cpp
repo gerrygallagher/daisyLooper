@@ -338,7 +338,7 @@ void AudioCallback(AudioHandle::InputBuffer  in,
 
             case LooperState::PLAYING:
                 if (loop_length > 0) {
-                    wet       = loop_buffer[play_head];
+                    wet       = loop_buffer[play_head] + dry;
                     play_head = (play_head + 1) % loop_length;
                 }
                 break;
