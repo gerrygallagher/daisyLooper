@@ -26,6 +26,7 @@ static const Pin PIN_LED_PLAY = seed::D14; // Green LED — play status
 // ─────────────────────────────────────────
 enum class LooperState {
     IDLE,        // nothing recorded yet
+    COUNTING,    // count-in clicks before first record
     RECORDING,   // capturing input to buffer
     PLAYING,     // looping playback
     OVERDUBBING, // layering new audio onto loop
@@ -47,6 +48,21 @@ size_t      play_head   = 0;
 
 Switch sw1, sw2;
 GPIO   led_rec, led_play;
+
+// Metronome click voice: noise → filter → envelope
+WhiteNoise click_noise;
+Svf        click_filter;
+AdEnv      click_env;
+static const float CLICK_LEVEL = 0.3f;   // click volume in the mix
+
+// Count-in timing
+static const float COUNT_IN_BPM   = 87.f;  // hardcoded for now; encoder later
+static const int   COUNT_IN_BEATS = 4;
+uint32_t beat_samples     = 0;   // samples per beat, set in main()
+uint32_t count_in_counter = 0;   // sample counter within the current beat
+int      count_in_beats   = 0;   // how many clicks have fired
+
+bool armed = false;   // overdub armed, waiting for the loop to restart
 
 // ─────────────────────────────────────────
 //  LED blinker — non-blocking
@@ -139,6 +155,7 @@ void ClearLoop() {
     }
     loop_length = 0;
     play_head   = 0;
+    armed       = false;
     state       = LooperState::IDLE;
     for (size_t i = 0; i < LOOP_BUFFER_SAMPLES; i++) loop_buffer[i] = 0.f;
 }
@@ -155,9 +172,13 @@ void ClearLoop() {
 void HandleSW1() {
     switch (state) {
         case LooperState::IDLE:
-            loop_length = 0;
-            play_head   = 0;
-            state       = LooperState::RECORDING;
+            count_in_counter = beat_samples;  // makes the first click fire instantly
+            count_in_beats   = 0;
+            state            = LooperState::COUNTING;
+            break;
+
+        case LooperState::COUNTING:
+            state = LooperState::IDLE;   // press again = cancel
             break;
 
         case LooperState::RECORDING:
@@ -166,7 +187,7 @@ void HandleSW1() {
             break;
 
         case LooperState::PLAYING:
-            state = LooperState::OVERDUBBING;
+            armed = !armed;   // arm overdub, or cancel if already armed
             break;
 
         case LooperState::OVERDUBBING:
@@ -194,12 +215,17 @@ void HandleSW2Short() {
         case LooperState::IDLE:
             break; // nothing to do
 
+        case LooperState::COUNTING:
+            state = LooperState::IDLE;
+            break;
+
         case LooperState::RECORDING:
             play_head = 0;
             state     = LooperState::PLAYING;
             break;
 
         case LooperState::PLAYING:
+            armed = false;            // cancel pending arm
             state = LooperState::STOPPED;
             break;
 
@@ -221,6 +247,11 @@ void UpdateLeds() {
     switch (state) {
         case LooperState::IDLE:
             blink_rec.SetOff();
+            blink_play.SetOff();
+            break;
+
+        case LooperState::COUNTING:
+            blink_rec.SetBlink(100);
             blink_play.SetOff();
             break;
 
@@ -263,24 +294,36 @@ void UpdateDisplay() {
     const char* state_text;
     switch (state) {
         case LooperState::IDLE:        state_text = "IDLE";    break;
+        case LooperState::COUNTING:    state_text = "COUNT";   break;
         case LooperState::RECORDING:   state_text = "REC";     break;
         case LooperState::PLAYING:     state_text = "PLAY";    break;
         case LooperState::OVERDUBBING: state_text = "OVERDUB"; break;
         case LooperState::STOPPED:     state_text = "STOP";    break;
     }
     oled.WriteString(state_text, Font_11x18, true);
+    if (state == LooperState::COUNTING) {
+        char beat_buf[4];
+        snprintf(beat_buf, sizeof(beat_buf), "%d", count_in_beats);
+        oled.SetCursor(108, 8);
+        oled.WriteString(beat_buf, Font_11x18, true);
+    }
     
-    // ── Top-right: time display M:SS / M:SS ──
-    if (loop_length > 0) {
+    // ── Top-right: ARMED cue (blinking) takes priority over time ──
+    if (state == LooperState::PLAYING && armed) {
+        if ((now / 250) % 2 == 0) {           // ~2 Hz blink
+            oled.SetCursor(80, 4);
+            oled.WriteString("ARMED", Font_6x8, true);
+        }
+    } else if (loop_length > 0) {
         uint32_t cur_sec   = play_head   / static_cast<uint32_t>(SAMPLE_RATE);
         uint32_t total_sec = loop_length / static_cast<uint32_t>(SAMPLE_RATE);
-        
+
         char time_buf[16];
         snprintf(time_buf, sizeof(time_buf), "%lu:%02lu/%lu:%02lu",
                  cur_sec / 60, cur_sec % 60,
                  total_sec / 60, total_sec % 60);
-        
-        oled.SetCursor(74, 4);  // top right area
+
+        oled.SetCursor(74, 4);
         oled.WriteString(time_buf, Font_6x8, true);
     }
     
@@ -318,11 +361,32 @@ void AudioCallback(AudioHandle::InputBuffer  in,
 {
     for (size_t i = 0; i < size; i++) {
         float dry = in[0][i];
+        // Click voice — silent unless click_env was triggered
+        float n       = click_noise.Process();
+        click_filter.Process(n);
+        float env_val = click_env.Process();
+        float click   = click_filter.Low() * env_val * CLICK_LEVEL;
         float wet = 0.f;
 
         switch (state) {
             case LooperState::IDLE:
                 wet = dry;
+                break;
+
+            case LooperState::COUNTING:
+                wet = dry;  // monitor your guitar while counting in
+                if (count_in_counter >= beat_samples) {
+                    count_in_counter = 0;
+                    if (count_in_beats >= COUNT_IN_BEATS) {
+                        loop_length = 0;
+                        play_head   = 0;
+                        state       = LooperState::RECORDING;  // downbeat!
+                    } else {
+                        click_env.Trigger();
+                        count_in_beats++;
+                    }
+                }
+                count_in_counter++;
                 break;
 
             case LooperState::RECORDING:
@@ -340,15 +404,20 @@ void AudioCallback(AudioHandle::InputBuffer  in,
                 if (loop_length > 0) {
                     wet       = loop_buffer[play_head] + dry;
                     play_head = (play_head + 1) % loop_length;
+                    // Armed overdub punches in exactly at the loop top
+                    if (armed && play_head == 0) {
+                        armed = false;
+                        state = LooperState::OVERDUBBING;
+                    }
                 }
                 break;
 
             case LooperState::OVERDUBBING:
                 if (loop_length > 0) {
-                    // 0.75 feedback prevents clipping on repeated overdubs
-                    loop_buffer[play_head] = (loop_buffer[play_head] * 0.75f) + (dry * 0.5f);
-                    wet       = loop_buffer[play_head];
-                    play_head = (play_head + 1) % loop_length;
+                    float old              = loop_buffer[play_head];
+                    loop_buffer[play_head] = (old * 0.75f) + (dry * 0.5f);  // what gets stored
+                    wet                    = old + dry;                      // what you hear
+                    play_head              = (play_head + 1) % loop_length;
                 }
                 break;
 
@@ -357,8 +426,8 @@ void AudioCallback(AudioHandle::InputBuffer  in,
                 break;
         }
 
-        out[0][i] = wet;
-        out[1][i] = wet;
+        out[0][i] = wet + click;
+        out[1][i] = wet + click;
     }
 }
 
@@ -383,6 +452,22 @@ int main() {
     // LEDs
     led_rec.Init(PIN_LED_REC,  GPIO::Mode::OUTPUT);
     led_play.Init(PIN_LED_PLAY, GPIO::Mode::OUTPUT);
+
+    // click track
+    click_noise.Init();
+    click_noise.SetAmp(1.f);
+
+    click_filter.Init(SAMPLE_RATE);
+    click_filter.SetFreq(2000.f);   // lower = duller/more muted, higher = sharper pick
+    click_filter.SetRes(0.3f);
+
+    click_env.Init(SAMPLE_RATE);
+    click_env.SetTime(ADENV_SEG_ATTACK, 0.001f);  // 1ms snap
+    click_env.SetTime(ADENV_SEG_DECAY,  0.040f);  // 40ms decay = percussive tick
+    click_env.SetMin(0.f);
+    click_env.SetMax(1.f);
+
+    beat_samples = (uint32_t)((60.f / COUNT_IN_BPM) * SAMPLE_RATE);
 
     // Clear SDRAM buffer
     for (size_t i = 0; i < LOOP_BUFFER_SAMPLES; i++) loop_buffer[i] = 0.f;
