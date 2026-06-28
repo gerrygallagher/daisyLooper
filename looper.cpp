@@ -2,6 +2,7 @@
 #include "daisysp.h"
 #include "dev/oled_ssd130x.h"
 #include "hid/disp/oled_display.h"
+#include "hid/encoder.h"
 
 using namespace daisy;
 using namespace daisysp;
@@ -56,7 +57,14 @@ AdEnv      click_env;
 static const float CLICK_LEVEL = 0.3f;   // click volume in the mix
 
 // Count-in timing
-static const float COUNT_IN_BPM   = 87.f;  // hardcoded for now; encoder later
+Encoder      encoder;
+static const Pin PIN_ENC_A     = seed::D2;   // channel A
+static const Pin PIN_ENC_B     = seed::D3;   // channel B
+static const Pin PIN_ENC_CLICK = seed::D4;   // unused (no button), never read
+
+float COUNT_IN_BPM = 87.f;   // adjustable; encoder changes it
+static const float BPM_MIN = 40.f;
+static const float BPM_MAX = 240.f;
 static const int   COUNT_IN_BEATS = 4;
 uint32_t beat_samples     = 0;   // samples per beat, set in main()
 uint32_t count_in_counter = 0;   // sample counter within the current beat
@@ -297,10 +305,18 @@ void UpdateDisplay() {
         case LooperState::COUNTING:    state_text = "COUNT";   break;
         case LooperState::RECORDING:   state_text = "REC";     break;
         case LooperState::PLAYING:     state_text = "PLAY";    break;
-        case LooperState::OVERDUBBING: state_text = "OVERDUB"; break;
+        case LooperState::OVERDUBBING: state_text = "OVRDUB"; break;
         case LooperState::STOPPED:     state_text = "STOP";    break;
     }
     oled.WriteString(state_text, Font_11x18, true);
+
+    if (state == LooperState::IDLE) {
+        char bpm_buf[16];
+        snprintf(bpm_buf, sizeof(bpm_buf), "%d BPM", (int)COUNT_IN_BPM);
+        oled.SetCursor(0, 20);
+        oled.WriteString(bpm_buf, Font_6x8, true);
+    }
+
     if (state == LooperState::COUNTING) {
         char beat_buf[4];
         snprintf(beat_buf, sizeof(beat_buf), "%d", count_in_beats);
@@ -449,6 +465,9 @@ int main() {
     sw2.Init(PIN_SW2, 1000.f, Switch::Type::TYPE_MOMENTARY,
              Switch::Polarity::POLARITY_INVERTED, Switch::Pull::PULL_UP);
 
+    // Encoder
+    encoder.Init(PIN_ENC_A, PIN_ENC_B, PIN_ENC_CLICK);
+
     // LEDs
     led_rec.Init(PIN_LED_REC,  GPIO::Mode::OUTPUT);
     led_play.Init(PIN_LED_PLAY, GPIO::Mode::OUTPUT);
@@ -485,6 +504,16 @@ int main() {
             ClearLoop();
         } else if (sw2_action == 1) {
             HandleSW2Short();
+        }
+
+        // Encoder — adjust count-in BPM
+        encoder.Debounce();
+        int inc = encoder.Increment();
+        if (inc != 0) {
+            COUNT_IN_BPM += inc;                       // CW = +1 BPM per detent
+            if (COUNT_IN_BPM < BPM_MIN) COUNT_IN_BPM = BPM_MIN;
+            if (COUNT_IN_BPM > BPM_MAX) COUNT_IN_BPM = BPM_MAX;
+            beat_samples = (uint32_t)((60.f / COUNT_IN_BPM) * SAMPLE_RATE);
         }
 
         UpdateLeds();
